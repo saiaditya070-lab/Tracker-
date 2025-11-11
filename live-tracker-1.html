@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Live Location Tracker (Consent-based)</title>
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+  <style>
+    html,body { height:100%; margin:0; font-family: system-ui, Arial; }
+    #map { height:60vh; }
+    .container { padding:16px; max-width:900px; margin:0 auto; }
+    .controls { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+    button { padding:10px 14px; border-radius:8px; border:1px solid #ccc; background:#fff; cursor:pointer; }
+    input[type="text"], input[type="number"] { padding:8px; border-radius:8px; border:1px solid #ccc; }
+    .status { margin-top:8px; color:#222; }
+    small.note { color:#555; display:block; margin-top:6px; }
+    footer { margin-top:12px; font-size:13px; color:#666; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Live Location Tracker — Consent Required</h2>
+    <p>Send this link to the person you want tracked. When they open it and allow location access, their position will update on this page in real time while the page stays open.</p>
+
+    <div class="controls">
+      <button id="startBtn">Start tracking (ask permission)</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <label>Update interval (s): <input id="interval" type="number" value="5" min="1" style="width:70px;"/></label>
+      <label>Send to server (POST URL): <input id="postUrl" type="text" placeholder="https://yourserver.com/api/location" style="width:320px;"/></label>
+      <label>Token: <input id="token" type="text" placeholder="optional token" style="width:150px;"/></label>
+    </div>
+
+    <div id="map"></div>
+    <div class="status" id="status">Status: idle</div>
+    <small class="note">Note: This page must be served over <strong>HTTPS</strong> to access geolocation on most browsers.</small>
+    <footer>
+      <strong>Privacy:</strong> This page only tracks location while the page is open and the user grants permission. Do not use for secret or non-consensual tracking.
+    </footer>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script>
+    const statusEl = document.getElementById('status');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const intervalInput = document.getElementById('interval');
+    const postUrlInput = document.getElementById('postUrl');
+    const tokenInput = document.getElementById('token');
+
+    function setStatus(msg) { statusEl.textContent = 'Status: ' + msg; }
+
+    const map = L.map('map', { center: [20.5937,78.9629], zoom: 5 });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    let marker = null;
+    let circle = null;
+    let watcherId = null;
+    let lastSent = 0;
+
+    async function sendToServer(payload){
+      const url = postUrlInput.value.trim();
+      if(!url) return;
+      try{
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if(!resp.ok){
+          console.warn('Server responded with', resp.status);
+        }
+      }catch(e){
+        console.warn('Failed to POST location:', e.message);
+      }
+    }
+
+    function onPosition(pos){
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+      const acc = pos.coords.accuracy;
+      const timestamp = pos.timestamp || Date.now();
+
+      if(!marker){
+        marker = L.marker([lat, lon]).addTo(map);
+        circle = L.circle([lat, lon], { radius: acc }).addTo(map);
+        map.setView([lat, lon], 16);
+      } else {
+        marker.setLatLng([lat, lon]);
+        circle.setLatLng([lat, lon]);
+        circle.setRadius(acc);
+      }
+
+      setStatus(`Got location — lat ${lat.toFixed(6)}, lon ${lon.toFixed(6)}, acc ${Math.round(acc)}m`);
+
+      const now = Date.now();
+      const intervalMs = Math.max(1000, Number(intervalInput.value) * 1000);
+      if(now - lastSent >= intervalMs){
+        lastSent = now;
+        const payload = {
+          token: tokenInput.value || null,
+          lat, lon, accuracy: acc, timestamp: new Date(timestamp).toISOString(), userAgent: navigator.userAgent
+        };
+        sendToServer(payload);
+      }
+    }
+
+    function onError(err){
+      console.error('Geolocation error', err);
+      if(err && err.code === 1){
+        setStatus('Permission denied. User must allow location.');
+      } else if(err && err.code === 2){
+        setStatus('Position unavailable.');
+      } else if(err && err.code === 3){
+        setStatus('Timeout obtaining position.');
+      } else {
+        setStatus('Error obtaining location');
+      }
+    }
+
+    startBtn.addEventListener('click', async ()=>{
+      if(!('geolocation' in navigator)){
+        setStatus('Geolocation not supported in this browser.');
+        return;
+      }
+      setStatus('Requesting permission...');
+      try{
+        watcherId = navigator.geolocation.watchPosition(onPosition, onError, {
+          enableHighAccuracy: true,
+          maximumAge: 0,
+          timeout: 20000
+        });
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        setStatus('Tracking started — waiting for first fix...');
+      }catch(e){
+        console.error(e);
+        setStatus('Failed to start geolocation: ' + e.message);
+      }
+    });
+
+    stopBtn.addEventListener('click', ()=>{
+      if(watcherId !== null){
+        navigator.geolocation.clearWatch(watcherId);
+        watcherId = null;
+      }
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      setStatus('Stopped');
+    });
+
+    (function maybeAutoStart(){
+      try{
+        const params = new URLSearchParams(location.search);
+        if(params.get('autostart') === '1'){
+          setTimeout(()=> startBtn.click(), 600);
+        }
+        const t = params.get('token');
+        if(t) tokenInput.value = t;
+        const p = params.get('post');
+        if(p) postUrlInput.value = decodeURIComponent(p);
+      }catch(e){}
+    })();
+  </script>
+
+  <!--
+    Usage notes:
+    1) Host this file on HTTPS (Netlify, GitHub Pages with custom domain + HTTPS, Vercel, etc.).
+    2) Share URL with ?autostart=1&token=YOUR_TOKEN_HERE to auto-prompt permission and include token.
+    3) If you want server receiving locations, set POST URL in the page or use ?post=https%3A%2F%2Fapi.example.com%2Fapi%2Flocation
+    4) Always get consent. Do not use for secret/non-consensual tracking.
+  -->
+</body>
+</html>
